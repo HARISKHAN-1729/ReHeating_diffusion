@@ -1,0 +1,46 @@
+# Schedule hyperparameters for all families
+# These are the defaults used across experiments.
+
+monotonic:
+  type: cosine
+  s: 0.008  # offset for cosine schedule
+
+single_reheat:
+  t_reheat: 0.4      # Position of reheat [0.2, 0.8]
+  delta: 0.15         # Magnitude of bump [0.05, 0.5]
+
+sawtooth:
+  period: 25          # Steps between bumps
+  sawtooth_delta: 0.08  # Magnitude per bump
+
+damped_oscillation:
+  A: 0.2              # Amplitude
+  gamma: 2.5          # Damping rate
+  freq: 4.0           # Oscillation frequency
+
+adaptive:
+  percentile: 80.0    # Calibration percentile for tau
+  delta: 0.15         # Reheat magnitude when triggered
+  max_reheats: 15     # Max reheat budget
+  n_calibration: 100  # Calibration samples
+
+# Experiment-specific overrides
+ablation_grid:
+  t_reheat_values: [0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
+  delta_values: [0.05, 0.1, 0.15, 0.2, 0.3, 0.5]
+
+# Sanity check (reduced) ablation grid
+ablation_grid_sanity:
+  t_reheat_values: [0.3, 0.5, 0.7]
+  delta_values: [0.1, 0.3]
+
+# EDM2 sigma defaults
+edm2:
+  sigma_min: 0.002
+  sigma_max: 80.0
+  rho: 7.0
+
+# Flow matching time defaults
+flow:
+  t_min: 0.001
+  t_max: 0.999
