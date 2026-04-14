@@ -1,96 +1,89 @@
 """
 Family 5: Adaptive reheat schedule.
-Triggers reheating when the model signals uncertainty (prediction instability).
-The most principled variant — reheats only when needed.
+Triggers reheating when the model's prediction changes sharply between steps.
+The schedule itself is monotonic — the adaptive sampler inserts reheat steps on-the-fly.
 """
 
 import numpy as np
-import torch
-from torch import Tensor
-from typing import Optional, List
-from dataclasses import dataclass
+from typing import Optional
 
 
-@dataclass
-class AdaptiveStats:
-    """Diagnostics from adaptive sampling."""
-    reheat_positions: List[int]
-    prediction_deltas: List[float]
-    total_nfe: int
-    total_reheats: int
-
-
-def make(N: int = 100, **kwargs) -> np.ndarray:
+def make(N: int = 100, num_train_timesteps: int = 1000, **kwargs) -> np.ndarray:
     """
     Returns a monotonic base schedule for adaptive sampling.
-    The actual adaptive behavior happens in the sampler, not the schedule.
-    This provides the base schedule that the adaptive sampler modifies on-the-fly.
+    The adaptive sampler (in samplers/ddim_reheating.py) modifies it on-the-fly.
     """
-    from .monotonic import make as make_monotonic
-    return make_monotonic(N=N)
+    from . import monotonic
+    return monotonic.make(N=N, num_train_timesteps=num_train_timesteps)
 
 
-@torch.no_grad()
 def calibrate_threshold(
     model,
+    alphas_cumprod,
     shape: tuple,
-    alpha_bars: Optional[np.ndarray] = None,
+    N: int = 50,
     n_calibration: int = 100,
+    num_train_timesteps: int = 1000,
     percentile: float = 80.0,
     device: str = 'cuda',
-    num_train_timesteps: int = 1000,
+    **kwargs,
 ) -> float:
     """
     Calibrate the adaptive reheat threshold tau.
 
-    Runs n_calibration monotonic samples and computes the percentile
-    of prediction-change magnitudes. Large changes indicate the model
-    is uncertain / near a mode boundary.
+    Runs n_calibration monotonic trajectories and records how much the x0
+    prediction changes between consecutive steps. The threshold is set at
+    the given percentile of these changes — reheating triggers when the
+    prediction changes more than most steps.
 
     Args:
-        model: UNet that takes (x_t, timestep_int) -> eps_pred
-        shape: Sample shape (batch, channels, height, width)
-        alpha_bars: Base monotonic schedule. If None, uses cosine with N=50.
-        n_calibration: Number of calibration trajectories.
-        percentile: Which percentile to use as threshold.
-        device: Device for computation.
-        num_train_timesteps: Model's training timestep count.
+        model: DDPMWrapper (callable: model(x_t, timestep) -> eps_pred)
+        alphas_cumprod: model's own alphas_cumprod tensor (shape [T])
+        shape: sample shape, e.g. (1, 3, 32, 32)
+        N: number of steps for calibration trajectories
+        n_calibration: number of trajectories to run
+        num_train_timesteps: model's T
+        percentile: which percentile to use as threshold
+        device: compute device
 
     Returns:
-        Calibrated threshold tau.
+        float: calibrated threshold tau
     """
-    if alpha_bars is None:
-        alpha_bars = make(N=50)
+    import torch
+    from . import monotonic
 
-    ab = torch.tensor(alpha_bars, dtype=torch.float32, device=device)
+    timesteps = monotonic.make(N=N, num_train_timesteps=num_train_timesteps)
+    ts_tensor = torch.tensor(timesteps, dtype=torch.long, device=device)
+    ac = alphas_cumprod.to(device)
     all_deltas = []
 
-    for _ in range(n_calibration):
-        x = torch.randn((1, *shape[1:]), device=device)
-        prev_x0 = None
+    with torch.no_grad():
+        for _ in range(n_calibration):
+            x = torch.randn((1, *shape[1:]), device=device)
+            prev_x0 = None
 
-        for i in range(len(ab) - 1):
-            a_c = ab[i]
-            ts = ((1 - a_c) * num_train_timesteps).long().clamp(0, num_train_timesteps - 1)
-            ts = ts.unsqueeze(0)
+            for i in range(len(ts_tensor) - 1):
+                t_cur = ts_tensor[i]
+                a_c = ac[t_cur]
+                t_batch = t_cur.unsqueeze(0)
 
-            with torch.cuda.amp.autocast(dtype=torch.float16):
-                eps = model(x, ts)
-            eps = eps.float()
+                with torch.cuda.amp.autocast(dtype=torch.float16):
+                    eps = model(x, t_batch)
+                eps = eps.float()
 
-            x0 = ((x - (1 - a_c).sqrt() * eps) / a_c.sqrt()).clamp(-1, 1)
+                x0 = ((x - (1 - a_c).sqrt() * eps) / a_c.sqrt()).clamp(-1, 1)
 
-            if prev_x0 is not None:
-                delta = (x0 - prev_x0).pow(2).mean().sqrt().item()
-                all_deltas.append(delta)
+                if prev_x0 is not None:
+                    delta = (x0 - prev_x0).pow(2).mean().sqrt().item()
+                    all_deltas.append(delta)
 
-            prev_x0 = x0.clone()
+                prev_x0 = x0.clone()
 
-            a_n = ab[i + 1]
-            eps_recon = (x - a_c.sqrt() * x0) / (1 - a_c).sqrt()
-            x = a_n.sqrt() * x0 + (1 - a_n).sqrt() * eps_recon
+                t_next = ts_tensor[i + 1]
+                a_n = ac[t_next] if t_next > 0 else torch.tensor(1.0, device=device)
+                eps_recon = (x - a_c.sqrt() * x0) / (1 - a_c).sqrt()
+                x = a_n.sqrt() * x0 + (1 - a_n).sqrt() * eps_recon
 
     tau = float(np.percentile(all_deltas, percentile))
-    print(f"Calibrated tau = {tau:.4f} (percentile {percentile}, "
-          f"from {len(all_deltas)} measurements)")
+    print(f"  Calibrated tau = {tau:.4f} (p{percentile}, {len(all_deltas)} measurements)")
     return tau
