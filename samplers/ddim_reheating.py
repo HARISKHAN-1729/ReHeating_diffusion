@@ -1,7 +1,14 @@
 """
-Generalized DDIM sampler supporting non-monotonic alpha_bar schedules.
-Identical to standard DDIM when schedule is monotonic.
-Also includes the adaptive reheating sampler.
+Generalized DDIM sampler supporting non-monotonic noise schedules.
+
+CRITICAL FIX: This sampler takes INTEGER TIMESTEPS and the model's own
+alphas_cumprod array. At each step, it looks up:
+    alpha_bar = alphas_cumprod[timestep]
+This guarantees the alpha_bar in the DDIM formula matches exactly what
+the model assumed when predicting epsilon. No schedule mismatch possible.
+
+The old version constructed its own cosine alpha_bar values which didn't
+match the model's linear-beta training schedule, producing garbage outputs.
 """
 
 import numpy as np
@@ -23,67 +30,80 @@ class AdaptiveStats:
 @torch.no_grad()
 def ddim_sample(
     model,
-    alpha_bars: np.ndarray,
+    timesteps: np.ndarray,
+    alphas_cumprod: torch.Tensor,
     shape: tuple,
     device: str = 'cuda',
     eta: float = 0.0,
     clip_denoised: bool = True,
-    num_train_timesteps: int = 1000,
     return_trajectory: bool = False,
     use_fp16: bool = True,
 ) -> Union[Tensor, Tuple[Tensor, list]]:
     """
-    Generalized DDIM sampler supporting non-monotonic alpha_bar schedules.
+    Generalized DDIM sampler with non-monotonic schedule support.
 
     Args:
-        model: UNet that takes (x_t, timestep_int) -> eps_pred
-        alpha_bars: from make_schedule(), sampling order (index 0=noise, N-1=clean)
-        shape: (batch_size, channels, height, width)
+        model: UNet(x_t, timestep_int) -> eps_pred
+        timesteps: integer timestep sequence from schedules.make_schedule().
+                   Ordered for sampling: index 0 = high timestep (noise),
+                   last index = 0 (clean). Non-monotonic segments have
+                   timesteps that INCREASE (reheat steps).
+        alphas_cumprod: model's own alphas_cumprod (1D tensor, length=T).
+                        Access via model.alphas_cumprod after loading.
+        shape: (batch_size, C, H, W)
         device: compute device
         eta: 0=deterministic DDIM, 1=stochastic DDPM-like
-        clip_denoised: whether to clip x0 predictions to [-1, 1]
-        num_train_timesteps: model's training timestep count (typically 1000)
-        return_trajectory: whether to return intermediate states
-        use_fp16: use float16 for model forward passes (saves VRAM)
+        clip_denoised: clip x0 predictions to [-1, 1]
+        return_trajectory: return list of intermediate states
+        use_fp16: use float16 for model forward passes
 
     Returns:
-        Generated samples (or tuple of samples and trajectory list).
+        Generated samples, or (samples, trajectory_list).
     """
-    ab = torch.tensor(alpha_bars, dtype=torch.float32, device=device)
+    ts_arr = torch.tensor(timesteps, dtype=torch.long, device=device)
+    ac = alphas_cumprod.to(device)  # shape [T], e.g. [1000]
     x = torch.randn(shape, device=device)
     traj = [x.cpu().clone()] if return_trajectory else None
 
-    for i in range(len(ab) - 1):
-        a_c, a_n = ab[i], ab[i + 1]
+    for i in range(len(ts_arr) - 1):
+        t_cur = ts_arr[i]
+        t_next = ts_arr[i + 1]
 
-        # Convert alpha_bar to integer timestep for model input
-        ts = ((1 - a_c) * num_train_timesteps).long().clamp(0, num_train_timesteps - 1)
-        ts = ts.expand(shape[0])
+        # Look up alpha_bar from the MODEL'S OWN schedule
+        a_c = ac[t_cur]
+        a_n = ac[t_next] if t_next > 0 else torch.tensor(1.0, device=device)
+
+        # Expand timestep for batch dimension
+        t_batch = t_cur.expand(shape[0])
 
         # Model forward pass
         if use_fp16 and device != 'cpu':
             with torch.cuda.amp.autocast(dtype=torch.float16):
-                eps = model(x, ts)
+                eps = model(x, t_batch)
             eps = eps.float()
         else:
-            eps = model(x, ts)
+            eps = model(x, t_batch)
 
-        # Predict x0
+        # Predict x0 using the CORRECT alpha_bar
         x0 = (x - (1 - a_c).sqrt() * eps) / a_c.sqrt()
         if clip_denoised:
             x0 = x0.clamp(-1, 1)
 
-        # Recompute eps from clipped x0 for consistency
+        # Recompute eps from (possibly clipped) x0
         eps = (x - a_c.sqrt() * x0) / (1 - a_c).sqrt()
 
-        # DDIM/DDPM step — works for both denoising and reheating
+        # DDIM step — works for BOTH directions:
+        #   a_n > a_c (more signal) = denoising step
+        #   a_n < a_c (less signal) = reheat step
         is_denoising = a_n > a_c
         if eta > 0 and is_denoising:
+            # Stochastic step (only when denoising)
             var = (1 - a_n) / (1 - a_c) * (1 - a_c / a_n)
             sigma = eta * var.clamp(min=0).sqrt()
             direction = (1 - a_n - sigma ** 2).clamp(min=0).sqrt() * eps
             x = a_n.sqrt() * x0 + direction + sigma * torch.randn_like(x)
         else:
+            # Deterministic step (always for reheat, optionally for denoise)
             x = a_n.sqrt() * x0 + (1 - a_n).sqrt() * eps
 
         if return_trajectory:
@@ -97,43 +117,60 @@ def ddim_sample(
 @torch.no_grad()
 def adaptive_sample(
     model,
-    base_alpha_bars: np.ndarray,
+    base_timesteps: np.ndarray,
+    alphas_cumprod: torch.Tensor,
     shape: tuple,
     tau: float,
-    delta: float = 0.15,
+    delta_jump: int = 50,
     device: str = 'cuda',
     eta: float = 0.0,
-    num_train_timesteps: int = 1000,
     max_reheats: int = 15,
     return_stats: bool = False,
     use_fp16: bool = True,
 ) -> Union[Tensor, Tuple[Tensor, AdaptiveStats]]:
     """
     Adaptive reheating sampler.
-    Triggers reheat when prediction change exceeds threshold tau.
-    Respects NFE budget: total NFE <= len(base_alpha_bars) + max_reheats.
+    Triggers reheat when prediction change between consecutive steps exceeds tau.
+
+    Args:
+        model: UNet(x_t, timestep_int) -> eps_pred
+        base_timesteps: integer timestep sequence (monotonic base).
+        alphas_cumprod: model's alphas_cumprod.
+        shape: (batch_size, C, H, W)
+        tau: prediction-change threshold (from calibrate_threshold).
+        delta_jump: how many integer timesteps to jump BACK when reheating.
+                    E.g. 50 means: if at timestep 200, jump back to 250.
+        device: compute device
+        eta: stochasticity parameter
+        max_reheats: budget cap on number of reheat insertions
+        return_stats: return AdaptiveStats diagnostics
+        use_fp16: use float16 for model forward
+
+    Returns:
+        Generated samples, or (samples, AdaptiveStats).
     """
-    schedule = list(base_alpha_bars)
-    device_t = torch.device(device)
-    x = torch.randn(shape, device=device_t)
+    schedule = list(base_timesteps.astype(int))
+    ac = alphas_cumprod.to(device)
+    num_ts = len(ac)
+    x = torch.randn(shape, device=device)
     prev_x0 = None
     nfe = 0
     n_reheats = 0
-    max_nfe = len(base_alpha_bars) + max_reheats
+    max_nfe = len(base_timesteps) + max_reheats
     stats = AdaptiveStats([], [], 0, 0) if return_stats else None
 
     i = 0
     while i < len(schedule) - 1 and nfe < max_nfe:
-        a_c = torch.tensor(schedule[i], dtype=torch.float32, device=device_t)
-        ts = ((1 - a_c) * num_train_timesteps).long().clamp(0, num_train_timesteps - 1)
-        ts = ts.expand(shape[0])
+        t_cur = int(schedule[i])
+        a_c = ac[t_cur]
+        t_batch = torch.tensor([t_cur], dtype=torch.long, device=device).expand(shape[0])
 
         if use_fp16 and device != 'cpu':
             with torch.cuda.amp.autocast(dtype=torch.float16):
-                eps = model(x, ts)
+                eps = model(x, t_batch)
             eps = eps.float()
         else:
-            eps = model(x, ts)
+            eps = model(x, t_batch)
 
         x0 = ((x - (1 - a_c).sqrt() * eps) / a_c.sqrt()).clamp(-1, 1)
         eps = (x - a_c.sqrt() * x0) / (1 - a_c).sqrt()
@@ -145,21 +182,22 @@ def adaptive_sample(
             if return_stats:
                 stats.prediction_deltas.append(delta_pred)
 
-            # Trigger reheat if unstable and budget allows
+            # Trigger reheat if prediction is unstable and budget allows
             if (delta_pred > tau
                     and n_reheats < max_reheats
                     and i < len(schedule) - 5):
-                a_reheat = float(a_c.item()) * (1 - delta)
-                a_reheat = max(a_reheat, 0.001)
-                schedule.insert(i + 1, a_reheat)
+                reheat_ts = min(t_cur + delta_jump, num_ts - 1)
+                schedule.insert(i + 1, reheat_ts)
                 n_reheats += 1
                 if return_stats:
                     stats.reheat_positions.append(i)
 
         prev_x0 = x0.clone()
 
-        # Step to next noise level
-        a_n = torch.tensor(schedule[i + 1], dtype=torch.float32, device=device_t)
+        # Step to next timestep in (possibly modified) schedule
+        t_next = int(schedule[i + 1])
+        a_n = ac[t_next] if t_next > 0 else torch.tensor(1.0, device=device)
+
         is_denoising = a_n > a_c
         if eta > 0 and is_denoising:
             var = (1 - a_n) / (1 - a_c) * (1 - a_c / a_n)
