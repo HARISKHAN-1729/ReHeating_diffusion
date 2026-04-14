@@ -1,43 +1,42 @@
 """
 Family 3: Periodic sawtooth schedule.
-Monotonic decrease with periodic partial re-noising.
-Answers: "Does repeated reheating compound benefits?"
+Every `period` steps, jump backward to a higher timestep (reheat),
+then resume denoising. Tests whether repeated reheating compounds benefits.
 """
 
 import numpy as np
-from .monotonic import _cosine_alpha_bar
+from . import monotonic
 
 
 def make(
     N: int = 100,
+    num_train_timesteps: int = 1000,
     period: int = 25,
     sawtooth_delta: float = 0.08,
     **kwargs,
 ) -> np.ndarray:
     """
-    Periodic sawtooth schedule.
-
-    Every `period` steps in the forward process, adds a partial re-noising
-    bump of magnitude sawtooth_delta.
+    Sawtooth schedule: periodic backward jumps in timestep space.
 
     Args:
-        N: Number of schedule steps.
-        period: Steps between each sawtooth bump.
-        sawtooth_delta: Magnitude of each bump.
+        N: number of sampling steps.
+        num_train_timesteps: model's T.
+        period: steps between each reheat.
+        sawtooth_delta: fraction of current timestep to jump back.
 
     Returns:
-        alpha_bar array of length N in sampling order.
+        Integer timestep array of length N+1 in sampling order.
     """
-    t = np.linspace(0, 1, N)
-    base = _cosine_alpha_bar(t)
-    fwd = base.copy()
+    base = monotonic.make(N=N, num_train_timesteps=num_train_timesteps)
+    result = base.copy()
 
-    for i in range(period, N - 5, period):
-        w = min(5, N - i)
-        for j in range(w):
-            idx = min(i + j, N - 1)
-            fwd[idx] = min(fwd[idx] + sawtooth_delta * (1 - j / w) * fwd[i], 0.999)
+    for i in range(period, N - 2, period):
+        current_ts = int(result[i])
+        if current_ts < 5:
+            continue  # Don't reheat near the end
+        jump = max(int(current_ts * sawtooth_delta), 1)
+        result[i] = min(current_ts + jump, num_train_timesteps - 1)
 
-    fwd[0] = 0.9999
-    fwd[-1] = 0.0001
-    return fwd[::-1].copy()
+    result[0] = num_train_timesteps - 1
+    result[-1] = 0
+    return result
