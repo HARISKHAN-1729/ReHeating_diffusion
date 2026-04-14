@@ -144,7 +144,7 @@ def generate_samples(
             shape=current_shape,
             device=device,
             order=order,
-            use_fp16=True,
+            use_fp16=False,
         )
 
         # Save images to disk
