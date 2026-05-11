@@ -52,37 +52,16 @@ schedule = single_reheat.make(N=50, t_reheat=0.4, delta=0.15)
 # Some consecutive pairs have alpha[i+1] < alpha[i] — these are reheat steps
 ```
 
-### Run the First Experiment (2D Toy)
 
-```bash
-# Train the 2D model and run all schedule comparisons (~15 min on GPU)
-python experiments/exp1_toy2d.py
-
-# Results saved to:
-#   results/tables/exp1_toy2d.csv
-#   results/figures/fig1_hero.pdf
-```
 
 ### Run the Make-or-Break Experiment (CIFAR-10)
 
 ```bash
 # Downloads google/ddpm-cifar10-32 automatically (~1.5 hours for full evaluation)
-python experiments/exp2_cifar_ddpm.py
+python experiments/exp1_cifar_ddpm.py
 
 # For a quick check with 10K images instead of 50K:
 python experiments/exp2_cifar_ddpm.py --n_samples 10000
-```
-
-### Run All Experiments
-
-```bash
-# Sequential (safest, ~12 GPU-hours total on A100)
-for i in 1 2 3 4 5 6 7 8 9; do
-    python experiments/exp${i}_*.py
-done
-
-# Regenerate all figures from saved results
-python figures/make_all.py
 ```
 
 ---
@@ -92,8 +71,6 @@ python figures/make_all.py
 ```
 reheating-diffusion/
 │
-├── CLAUDE.md                    # Implementation guide (for AI agent)
-├── PROGRESS.md                  # Development progress tracker
 ├── README.md                    # This file
 ├── requirements.txt             # Python dependencies
 │
@@ -119,32 +96,18 @@ reheating-diffusion/
 │   └── flow_wrapper.py          #   OT-CFM UNet wrapper
 │
 ├── experiments/                 # Experiment scripts (self-contained)
-│   ├── exp1_toy2d.py            #   2D Gaussian mixture proof-of-concept
-│   ├── exp2_cifar_ddpm.py       #   CIFAR-10 with pretrained DDPM
-│   ├── exp3_cifar_edm2.py       #   CIFAR-10 with pretrained EDM2
-│   ├── exp4_imagenet_edm2.py    #   ImageNet-64 with pretrained EDM2
-│   ├── exp5_cifar_flow.py       #   CIFAR-10 with flow matching
-│   ├── exp6_ablation.py         #   Schedule hyperparameter grid search
-│   ├── exp7_pareto.py           #   NFE Pareto frontier
-│   ├── exp8_adaptive.py         #   Adaptive vs. fixed schedules
-│   └── exp9_failures.py         #   Failure characterization
+│   ├── exp1_cifar_ddpm.py       #   CIFAR-10 with pretrained DDPM
+│   ├── exp2_cifar_edm2.py       #   CIFAR-10 with pretrained EDM2│
+│   ├── exp3_cifar_flow.py       #   CIFAR-10 with flow matching
+│   ├── exp4_ablation.py         #   Schedule hyperparameter grid search
+│   ├── exp5_pareto.py           #   NFE Pareto frontier
+│        
 │
 ├── eval/                        # Evaluation metrics
 │   ├── fid.py                   #   FID-50K (via clean-fid)
 │   ├── inception_score.py       #   Inception Score
 │   ├── precision_recall.py      #   Kynkäänniemi et al. P&R
 │   └── mode_coverage.py         #   2D mode counting + W2 distance
-│
-├── figures/                     # Figure generation scripts
-│   ├── style.py                 #   Shared colors, fonts, layout
-│   ├── make_all.py              #   Regenerate all figures from saved data
-│   ├── fig1_hero.py             #   Teaser (trajectories + coverage + FID)
-│   ├── fig2_method_schematic.py #   Noise-level trajectory diagram
-│   ├── fig3_schedule_families.py#   α̅(t) for all 5 families
-│   ├── fig4_cross_model_bars.py #   FID bar charts across models
-│   ├── fig5_ablation_heatmap.py #   FID vs (t_reheat, δ)
-│   ├── fig6_pareto.py           #   FID vs NFE curves
-│   └── fig7_adaptive_analysis.py#   Adaptive reheat diagnostics
 │
 ├── configs/
 │   └── schedules.yaml           #   Default hyperparameters for all schedules
@@ -191,16 +154,12 @@ Triggers reheating when the model's prediction becomes unstable (prediction x̂�
 
 | # | Name | Dataset | Model | What It Tests | GPU Time |
 |---|------|---------|-------|---------------|----------|
-| 1 | 2D Proof of Concept | Synthetic 2D | 4-layer MLP | Mode exploration via reheating | ~0.5h |
-| 2 | CIFAR-10 DDPM | CIFAR-10 | Pretrained DDPM | Core hypothesis (make-or-break) | ~1.5h |
-| 3 | CIFAR-10 EDM2 | CIFAR-10 | Pretrained EDM2 | Modern architecture validation | ~1.5h |
-| 4 | ImageNet-64 EDM2 | ImageNet-64 | Pretrained EDM2 | Larger/more diverse dataset | ~2h |
-| 5 | Flow Matching | CIFAR-10 | OT-CFM | Generalization beyond score-based | ~1.5h |
-| 6 | Schedule Ablation | CIFAR-10 | Best model | Where/how much to reheat | ~2h |
-| 7 | Pareto Frontier | CIFAR-10 | All | Quality-compute tradeoff | ~1h |
-| 8 | Adaptive vs Fixed | CIFAR-10 | EDM2 | Data-dependent reheating | ~1h |
-| 9 | Failure Modes | CIFAR-10 | EDM2 | When reheating hurts | ~1h |
-| **Total** | | | | | **~12h** |
+| 1 | CIFAR-10 DDPM | CIFAR-10 | Pretrained DDPM | Core hypothesis (make-or-break) 
+| 2 | CIFAR-10 EDM2 | CIFAR-10 | Pretrained EDM2 | Modern architecture validation 
+| 3 | Flow Matching | CIFAR-10 | OT-CFM | Generalization beyond score-based 
+| 4 | Schedule Ablation | CIFAR-10 | Best model | Where/how much to reheat
+| 5 | Pareto Frontier | CIFAR-10 | All | Quality-compute tradeoff 
+
 
 ### Running Individual Experiments
 
@@ -214,14 +173,7 @@ python experiments/exp1_toy2d.py --sanity
 python experiments/exp1_toy2d.py --full
 ```
 
-Common flags:
-- `--sanity`: Quick validation with 256 samples (default)
-- `--full`: Full-scale evaluation with 50K samples
-- `--batch_size`: Batch size (default: 8 for image models, 256 for 2D toy)
-- `--seed`: Random seed (default: 42)
-- `--device`: CUDA device (default: cuda:0)
 
----
 
 ## Evaluation Metrics
 
@@ -248,31 +200,8 @@ Common flags:
 
 ---
 
-## Reproducing Figures
 
-All figures can be regenerated from saved experiment data:
 
-```bash
-# Regenerate all figures
-python figures/make_all.py
-
-# Regenerate individual figures
-python figures/fig1_hero.py
-python figures/fig5_ablation_heatmap.py
-# ... etc.
-```
-
-Figures are saved to `results/figures/` in both PDF (for papers) and PNG (for presentations) at 300 DPI.
-
-### Figure Design
-
-All figures use a consistent visual style defined in `figures/style.py`:
-- **Color palette:** Colorblind-friendly, 7 distinct colors mapping to the 7 method variants
-- **Typography:** Serif fonts (Times New Roman / DejaVu Serif) matching NeurIPS style
-- **Layout:** No top/right spines, subtle gridlines, tight bounding boxes
-- **Export:** 300 DPI, tight layout, minimal whitespace
-
----
 
 ## The Core Algorithm
 
@@ -323,38 +252,12 @@ adaptive:
 
 ---
 
-## Preliminary Results (Sanity Checks — 256 Samples)
-
-These results are from quick validation runs. Full-scale numbers (50K samples) will replace them.
-
-### Exp 1: 2D Toy — All methods cover 8/8 modes
-DDPM (η=1) achieves the lowest Wasserstein-2 distance (0.18–0.20), supporting the claim that stochastic DDPM sampling acts as implicit reheating.
-
-### Exp 6: Ablation — Early moderate reheating helps
-The best configuration (t_reheat=0.3, δ=0.3) improves FID by 22.6 points over the DDIM baseline.
-
-### Exp 7: Pareto — DDPM dramatically outperforms DDIM
-A 71-point FID gap (327 vs 398 at NFE=10) between DDPM and DDIM, consistent with the paper's core hypothesis.
-
-### Exp 9: Failure characterization — Extreme reheating is surprisingly stable
-No NaN/Inf even at δ=1.0. Large δ values (0.5–1.0) actually _improve_ FID over the baseline (310 vs 404), suggesting more aggressive reheating than expected may be beneficial.
-
-### LaTeX Tables
-
-Pre-generated LaTeX tables are in `results/tables/`:
-```bash
-python results/generate_tables.py   # Regenerate from CSVs
-```
-
----
-
 ## Citation
 
 ```bibtex
 @inproceedings{reheating2026,
   title={Reheat to Refine: Non-Monotonic Noise Schedules Improve Diffusion Sampling},
-  author={Muhammad Haris Khan},
-  
+  author={Muhammad Haris Khan},  
   year={2026}
 }
 ```
