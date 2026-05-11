@@ -353,8 +353,8 @@ python results/generate_tables.py   # Regenerate from CSVs
 ```bibtex
 @inproceedings{reheating2026,
   title={Reheat to Refine: Non-Monotonic Noise Schedules Improve Diffusion Sampling},
-  author={...},
-  booktitle={NeurIPS},
+  author={Muhammad Haris Khan},
+  
   year={2026}
 }
 ```
@@ -367,19 +367,3 @@ This project is for research purposes.
 
 ---
 
-## Troubleshooting
-
-### FID is unreasonably high (>100)
-Most likely an image normalization issue. Generated images must be uint8 in [0, 255], not float in [-1, 1]. Check the conversion: `imgs = ((imgs.clamp(-1,1) + 1) / 2 * 255).to(torch.uint8)`.
-
-### Model download fails
-Check your internet connection and HuggingFace access. For EDM2, you may need to download checkpoints manually from the Karras et al. GitHub repository.
-
-### Out of GPU memory
-Reduce batch size in the experiment script. For A100 (40GB), batch_size=128 works for CIFAR-10. For V100 (16GB), use batch_size=32–64. Use `--device cpu` for debugging (very slow for FID).
-
-### Experiments take too long
-Use `--n_samples 10000` for quick FID estimates (noisier but 5× faster). FID-10K is sufficient for development; switch to FID-50K only for final reported numbers.
-
-### Negative results
-This is expected — the paper's own assessment gives a ~35% chance of weak/negative results. Run all experiments honestly and document what you find.
